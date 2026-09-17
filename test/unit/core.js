@@ -355,10 +355,14 @@ asyncTest("isPlainObject", function() {
 	// Objects from other windows should be matched
 	Globals.register("iframeDone");
 	window.iframeDone = function( otherObject, detail ) {
-		window.iframeDone = undefined;
-		iframe.parentNode.removeChild( iframe );
-		ok( jQuery.isPlainObject(new otherObject()), "new otherObject" + ( detail ? " - " + detail : "" ) );
-		start();
+		// Defer: the iframe's onload can fire synchronously from doc.close() below,
+		// and start()ing before this test function returns races QUnit's bookkeeping.
+		window.setTimeout(function() {
+			window.iframeDone = undefined;
+			iframe.parentNode.removeChild( iframe );
+			ok( jQuery.isPlainObject(new otherObject()), "new otherObject" + ( detail ? " - " + detail : "" ) );
+			start();
+		}, 0);
 	};
 
 	try {
@@ -1340,6 +1344,34 @@ test("jQuery.parseHTML", function() {
 	equal( jQuery.parseHTML("<span><span>").length, 1, "Incorrect html-strings should not break anything" );
 	equal( jQuery.parseHTML("<td><td>")[ 1 ].parentNode.nodeType, 11, "parentNode should be documentFragment" );
 });
+
+test("jQuery.parseHTML(<a href>) - gh-2965", function() {
+	expect( 1 );
+
+	var html = "<a href='test.html'></a>",
+		href = jQuery.parseHTML( html )[ 0 ].href;
+
+	ok( /\/test\.html$/.test( href ), "href is not lost after parsing anchor" );
+});
+
+// This XSS test is optional, as it will only pass when
+// `document.implementation.createHTMLDocument` is implemented; it is not
+// available in IE8 and below and might not be for older Android browsers either.
+if ( jQuery.support.createHTMLDocument ) {
+	asyncTest("jQuery.parseHTML", function() {
+		expect( 1 );
+
+		Globals.register("parseHTMLError");
+
+		jQuery.globalEval("parseHTMLError = false;");
+		jQuery.parseHTML( "<img src=x onerror='parseHTMLError = true'>" );
+
+		window.setTimeout(function() {
+			start();
+			equal( window.parseHTMLError, false, "onerror eventhandler has not been called." );
+		}, 2000);
+	});
+}
 
 test("jQuery.parseJSON", function() {
 	expect( 20 );

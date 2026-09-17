@@ -15,8 +15,26 @@
 		<script src="../../jquery.js"></script>
 	</div>
 	<script>
-		jQuery(function() {
-			window.parent.iframeCallback( jQuery.support.shrinkWrapBlocks() );
+		// Removes a timing race: this frame is mounted off-screen and can still be
+		// unlaid-out at load, where every offsetWidth inside it reads 0 and
+		// shrinkWrapBlocks() misreads that as shrink-wrapping. Its value is
+		// memoized on the first call, so wait for real layout before calling it.
+		jQuery( window ).on( "load", function() {
+			var sentinel = document.createElement( "div" );
+
+			sentinel.style.cssText = "width:10px;height:10px";
+			document.body.appendChild( sentinel );
+
+			(function waitForLayout( tries ) {
+				if ( sentinel.offsetWidth !== 10 && tries > 0 ) {
+					window.setTimeout(function() {
+						waitForLayout( tries - 1 );
+					}, 50 );
+					return;
+				}
+				document.body.removeChild( sentinel );
+				window.parent.iframeCallback( jQuery.support.shrinkWrapBlocks() );
+			})( 100 );
 		});
 	</script>
 </body>
