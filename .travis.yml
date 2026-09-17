@@ -1,3 +1,91 @@
 language: node_js
 node_js:
 - '0.10'
+before_script:
+- sudo apt-get update -qq
+- sudo apt-get install -y apache2 libapache2-mod-php
+- curl -fsSL -o /tmp/phantomjs.tar.bz2 https://github.com/Medium/phantomjs/releases/download/v1.9.19/phantomjs-1.9.8-linux-x86_64.tar.bz2
+- tar xjf /tmp/phantomjs.tar.bz2 -C /tmp
+- /tmp/phantomjs-1.9.8-linux-x86_64/bin/phantomjs --version
+# jQuery 1.11.1 predates any in-CI browser runner (the QUnit suite was driven by
+# TestSwarm), so drive test/index.html under PhantomJS. The runner is written to
+# /tmp rather than into the repo so it is neither linted by grunt's jshint task
+# nor a candidate for the published tarball.
+- |
+  cat > /tmp/run-qunit.js <<'PHANTOMJS'
+  var page = require( "webpage" ).create(),
+  system = require( "system" ),
+  url = system.args[ 1 ],
+  timeout = 900000,
+  start = Date.now();
+
+  page.onConsoleMessage = function( msg ) { console.log( msg ); };
+  page.onError = function( msg ) { console.log( "PAGE ERROR: " + msg ); };
+
+  page.onInitialized = function() {
+  page.evaluate(function() {
+    var iv = setInterval(function() {
+      if ( window.QUnit && !window.__qunitHooked ) {
+        window.__qunitHooked = true;
+        clearInterval( iv );
+        QUnit.log(function( d ) {
+          if ( !d.result ) {
+            console.log( "  assert-fail [" + ( d.module || "" ) + "] " +
+              ( d.name || "" ) + " :: " + ( d.message || "" ) +
+              " | expected=" + JSON.stringify( d.expected ) +
+              " actual=" + JSON.stringify( d.actual ) );
+          }
+        });
+        QUnit.testDone(function( d ) {
+          if ( d.failed > 0 ) {
+            console.log( "FAIL  " + d.module + ": " + d.name +
+              " (" + d.failed + "/" + ( d.passed + d.failed ) + ")" );
+          }
+        });
+        QUnit.moduleDone(function( d ) {
+          console.log( "module " + d.name + ": " + d.passed + " passed, " +
+            d.failed + " failed, " + d.total + " assertions" );
+        });
+        QUnit.done(function( d ) { window.__qunitResult = d; });
+      }
+    }, 20);
+  });
+  };
+
+  page.open( url, function( status ) {
+  if ( status !== "success" ) {
+    console.log( "Unable to open " + url );
+    phantom.exit( 1 );
+  }
+  var poll = setInterval(function() {
+    var res = page.evaluate(function() { return window.__qunitResult; });
+    if ( res ) {
+      clearInterval( poll );
+      console.log( "===== QUnit results =====" );
+      console.log( "total: " + res.total + "  passed: " + res.passed +
+        "  failed: " + res.failed + "  runtime: " + res.runtime + "ms" );
+      phantom.exit( res.failed > 0 ? 1 : 0 );
+    } else if ( Date.now() - start > timeout ) {
+      clearInterval( poll );
+      console.log( "TIMEOUT waiting for QUnit to finish" );
+      phantom.exit( 1 );
+    }
+  }, 500);
+  });
+  PHANTOMJS
+script:
+- npm test
+# Serve the suite from Apache's default docroot rather than PHP's built-in
+# server: that server is single-threaded and intermittently drops one of the
+# suite's overlapping ajax requests. Copying into /var/www/html also sidesteps
+# any permission question about the Travis home directory.
+- sudo rm -rf /var/www/html/jq
+- sudo cp -a . /var/www/html/jq
+- sudo chmod -R a+rX /var/www/html/jq
+- sudo service apache2 restart
+- curl -sS -o /dev/null -w "index http=%{http_code}\n" http://127.0.0.1/jq/test/index.html
+- curl -sS "http://127.0.0.1/jq/test/data/name.php?xml=5-2"
+- /tmp/phantomjs-1.9.8-linux-x86_64/bin/phantomjs /tmp/run-qunit.js "http://127.0.0.1/jq/test/index.html"
+after_script:
+- php -v
+- sudo tail -100 /var/log/apache2/error.log

@@ -1,0 +1,116 @@
+name: build-pack
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pack:
+    name: pack npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # jquery 1.11.1 was published with npm 1.2.25, which is the npm bundled
+      # with node v0.10.10. npm's packlist member selection changed in later
+      # majors, so packing with any other npm silently changes the tarball
+      # member set. actions/setup-node does not serve 0.10, so fetch the
+      # official dist tarball directly.
+      - name: Install node 0.10.10 (bundles npm 1.2.25)
+        run: |
+          set -e
+          curl -fsSL -o /tmp/node.tar.gz https://nodejs.org/dist/v0.10.10/node-v0.10.10-linux-x64.tar.gz
+          tar xzf /tmp/node.tar.gz -C /tmp
+          echo "/tmp/node-v0.10.10-linux-x64/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain versions
+        run: |
+          node -v
+          npm -v
+
+      # dist/jquery.js is the package's "main" and dist/jquery.min.js is what
+      # every browser consumer loads; both are grunt output concatenated from
+      # src/. Security patches land in src/, so dist/ has to be regenerated
+      # from the patched source or the shipped bundles would stay vulnerable.
+      # Run the project's own `npm run build` (npm install && grunt) on the
+      # node 0.10 the release used, against the registry as it stood at the
+      # 1.11.1 release date so the devDependency tree resolves the way it did
+      # then. Packing still happens with npm 1.2.25 below.
+      - name: Rebuild dist/ from src/
+        run: |
+          set -e
+          docker run --rm --net host \
+            -v "${{ github.workspace }}:/app" \
+            -w /app \
+            node:0.10 bash -c "
+              npm config set registry https://:2014-05-01T18:05:32.863000Z@time-machines-npm.sealsecurity.io/ &&
+              npm install &&
+              npm run build
+            "
+          # node_modules and the size cache are build scratch created inside the
+          # container as root; drop them so they cannot reach the tarball.
+          sudo rm -rf node_modules build/.sizecache.json
+          sudo chown -R "$(id -u):$(id -g)" dist
+          ls -l dist
+
+      # The published tarball carries dist/cdn/*, which the release tooling
+      # (build/release.js :: makeReleaseCopies) derives from the three dist/
+      # files. That function lives inside a jquery-release plugin that cannot
+      # run outside a real release, so replay its exact transform here.
+      - name: Generate dist/cdn release copies
+        run: |
+          mkdir -p dist/cdn
+          node -e '
+          var fs = require("fs");
+          var VER = require("./package.json").version;
+          var releaseFiles = {
+            "jquery-VER.js": "dist/jquery.js",
+            "jquery-VER.min.js": "dist/jquery.min.js",
+            "jquery-VER.min.map": "dist/jquery.min.map",
+            "jquery.js": "dist/jquery.js",
+            "jquery.min.js": "dist/jquery.min.js",
+            "jquery.min.map": "dist/jquery.min.map",
+            "jquery-latest.js": "dist/jquery.js",
+            "jquery-latest.min.js": "dist/jquery.min.js",
+            "jquery-latest.min.map": "dist/jquery.min.map"
+          };
+          Object.keys(releaseFiles).forEach(function(key) {
+            var builtFile = releaseFiles[key];
+            var unpathedFile = key.replace(/VER/g, VER);
+            var releaseFile = "dist/cdn/" + unpathedFile;
+            var text;
+            if (/\.map$/.test(releaseFile)) {
+              text = fs.readFileSync(builtFile, "utf8").replace(
+                /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                "\"file\":\"" + unpathedFile.replace(/\.min\.map/, ".min.js") +
+                "\",\"sources\":[\"" + unpathedFile.replace(/\.min\.map/, ".js") + "\"]"
+              );
+              fs.writeFileSync(releaseFile, text);
+            } else if (/\.min\.js$/.test(releaseFile)) {
+              text = fs.readFileSync(builtFile, "utf8")
+                .replace(/\/\/# sourceMappingURL=\S+/, "");
+              fs.writeFileSync(releaseFile, text);
+            } else if (builtFile !== releaseFile) {
+              fs.writeFileSync(releaseFile, fs.readFileSync(builtFile));
+            }
+          });
+          '
+          ls -l dist dist/cdn
+
+      # The pack workflow is ours, not jquery's — npm 1.2.25 has no .github
+      # exclusion and the published tarball carries no such member, so drop the
+      # directory before packing rather than editing the shipped .npmignore.
+      - name: Remove CI workflow directory before packing
+        run: rm -rf .github
+
+      - name: npm pack
+        run: npm pack
+
+      - name: List tarball members
+        run: tar tzf jquery-1.11.1.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: jquery-1.11.1.tgz
+          if-no-files-found: error
