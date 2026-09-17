@@ -477,7 +477,9 @@ test( "attr(String, Object)", function() {
 test( "attr - extending the boolean attrHandle", function() {
 	expect( 1 );
 	var called = false,
-		_handle = jQuery.expr.attrHandle.checked || $.noop;
+		origAttrHandleHadChecked = "checked" in jQuery.expr.attrHandle,
+		origAttrHandleChecked = jQuery.expr.attrHandle.checked,
+		_handle = origAttrHandleChecked || $.noop;
 	jQuery.expr.attrHandle.checked = function() {
 		called = true;
 		_handle.apply( this, arguments );
@@ -486,6 +488,12 @@ test( "attr - extending the boolean attrHandle", function() {
 	called = false;
 	jQuery( "input" ).attr( "checked" );
 	ok( called, "The boolean attrHandle does not drop custom attrHandles" );
+
+	if ( origAttrHandleHadChecked ) {
+		jQuery.expr.attrHandle.checked = origAttrHandleChecked;
+	} else {
+		delete jQuery.expr.attrHandle.checked;
+	}
 });
 
 test( "attr(String, Object) - Loaded via XML document", function() {
@@ -1475,4 +1483,41 @@ test( "Insignificant white space returned for $(option).val() (#14858)", functio
 
 	val = jQuery( "<option>  test  </option>" ).val();
 	equal( val.length, 4, "insignificant white-space returned for value" );
+});
+
+test( "non-lowercase boolean attribute getters should not crash", function() {
+	expect( 5 );
+
+	var elem = jQuery( "<input checked required autofocus type='checkbox'>" ),
+		elems = jQuery([ elem[ 0 ], document.createElement("input") ]);
+
+	jQuery.each({
+		checked: "Checked",
+		required: "requiRed",
+		autofocus: "AUTOFOCUS"
+	}, function( lowercased, original ) {
+		try {
+			strictEqual( elem.attr( original ), lowercased,
+				"The '" + this + "' attribute getter should return the lowercased name" );
+		} catch ( e ) {
+			ok( false, "The '" + this + "' attribute getter threw" );
+		}
+	});
+
+	// The selector engine looks the boolean attrHandle up by the lowercased name
+	// but calls it with the raw one, so keying the temporary removal on the raw
+	// name made the getter call itself forever (gh-3133)
+	try {
+		strictEqual( jQuery.find.attr( elem[ 0 ], "Checked" ), "checked",
+			"jQuery.find.attr returns the lowercased name for a non-lowercase boolean attribute" );
+	} catch ( e ) {
+		ok( false, "jQuery.find.attr threw for a non-lowercase boolean attribute" );
+	}
+
+	try {
+		deepEqual( elems.filter("[requiRed]").get(), [ elem[ 0 ] ],
+			"Filtering by a non-lowercase boolean attribute should not recurse infinitely" );
+	} catch ( e ) {
+		ok( false, "Filtering by a non-lowercase boolean attribute threw" );
+	}
 });
